@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import pyudev
+import tty
+import termios
+from STservo_sdk import *  # Make sure this module is included in the same directory
+
+# Constants
+BAUDRATE = 1000000
+STS_MIN_POS = 0
+STS_MAX_POS = 4095
+DEFAULT_DEVICE = '/dev/ttyACM0'
+
+# Global Variables
+interfaces = []
+selected_interface = None
+motors = {}
+selected_motor = None
+min_position = None
+max_position = None
+
+# Helpers for keyboard input
+def getch():
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return ch
+
+# Detect USB events
+def monitor_usb():
+    def usb_callback(device):
+        """
+        Callback for USB device events. Updates the `interfaces` list when a
+        serial device is added or removed.
+        """
+        action = device.action
+        device_node = device.device_node
+
+        if device_node is None:
+            # Skip devices without a device node
+            return
+
+        if action == 'add' and "ttyACM" in device_node:
+            if device_node not in interfaces:
+                print(f"USB Device Added: {device_node}")
+                interfaces.append(device_node)
+        elif action == 'remove' and device_node in interfaces:
+            print(f"USB Device Removed: {device_node}")
+            interfaces.remove(device_node)
+
+    context = pyudev.Context()
+    monitor = pyudev.Monitor.from_netlink(context)
+    monitor.filter_by('usb')
+    observer = pyudev.MonitorObserver(monitor, callback=usb_callback)
+    observer.start()
+
+
+def scan_existing_interfaces():
+    """
+    Scan for existing USB interfaces that match the criteria and add them
+    to the `interfaces` list at startup.
+    """
+    context = pyudev.Context()
+    for device in context.list_devices(subsystem='tty'):
+        device_node = device.device_node
+        if device_node and "ttyACM" in device_node:
+            print(f"Found existing interface: {device_node}")
+            if device_node not in interfaces:
+                interfaces.append(device_node)
+
+# Initialize STServo SDK
+def initialize_sdk(device):
+    port_handler = PortHandler(device)
+    packet_handler = sts(port_handler)
+    if not port_handler.openPort():
+        print(f"Failed to open port {device}")
+        return None, None
+    if not port_handler.setBaudRate(BAUDRATE):
+        print(f"Failed to set baudrate for {device}")
+        return None, None
+    print(f"Initialized device {device}")
+    return port_handler, packet_handler
+
+
+def discover_motors(packet_handler):
+    """
+    Scan for motors connected to the interface and update the `motors` dictionary.
+    """
+    global motors
+    motors.clear()
+    print("Scanning for motors...")
+
+    for motor_id in range(1, 253):
+        try:
+            # Attempt to read the position of the motor
+            _, _, result, _ = packet_handler.ReadPosSpeed(motor_id)
+            if result == COMM_SUCCESS:
+                motors[motor_id] = {"min_pos": None, "max_pos": None}
+                print(f"Discovered motor ID: {motor_id}")
+        except Exception as e:
+            print(f"Error scanning motor ID {motor_id}: {e}")
+    
+    if not motors:
+        print("No motors found.")
+    return motors
+
+
+# Assign ID to motor
+def tag_motor(packet_handler, current_id, new_id):
+    result, error = packet_handler.WriteID(current_id, new_id)
+    if result == COMM_SUCCESS and error == 0:
+        print(f"Motor ID {current_id} updated to {new_id}")
+        motors[new_id] = motors.pop(current_id)
+    else:
+        print(f"Failed to update ID from {current_id} to {new_id}")
+
+# Move motor to specific position
+def move_motor(packet_handler, motor_id, position):
+    result, error = packet_handler.WritePosEx(motor_id, position, 2400, 50)
+    if result != COMM_SUCCESS or error != 0:
+        print(f"Failed to move motor ID {motor_id} to position {position}")
+
+# Center motor
+def center_motor(packet_handler, motor_id):
+    if min_position is not None and max_position is not None:
+        center = (min_position + max_position) // 2
+        move_motor(packet_handler, motor_id, center)
+        print(f"Motor ID {motor_id} moved to center position: {center}")
+    else:
+        print("Min and max positions must be set before centering.")
+
+# Main loop
+def main():
+    global selected_interface, selected_motor, min_position, max_position
+
+    # Scan for existing interfaces
+    scan_existing_interfaces()
+
+    # Monitor USB in a separate thread
+    import threading
+    usb_thread = threading.Thread(target=monitor_usb, daemon=True)
+    usb_thread.start()
+
+    while True:
+        print("Options: i - interfaces, m - motors, t - tag motor, <-/-> move, n - set min, x - set max, s - status, c - center, q - quit")
+        command = getch()
+        
+        if command == 'i':
+            if interfaces:
+                print("Available interfaces:")
+                for idx, iface in enumerate(interfaces):
+                    print(f"{idx}: {iface}")
+                if len(interfaces) == 1:
+                    selected_interface = interfaces[0]
+                    print(f"Automatically selected interface: {selected_interface}")
+                else:
+                    selected_interface = interfaces[int(input("Select interface: "))]
+            else:
+                print("No interfaces found.")
+        
+        elif command == 'm':
+            if not selected_interface:
+                print("No interface selected.")
+                continue
+
+            port_handler, packet_handler = initialize_sdk(selected_interface)
+            if not port_handler or not packet_handler:
+                print("Failed to initialize SDK.")
+                continue
+
+            motors = discover_motors(packet_handler)
+            if not motors:
+                print("No motors found. Ensure motors are connected and powered.")
+                continue
+
+            print("Available motors:")
+            for motor_id in motors.keys():
+                print(f"ID: {motor_id}")
+            
+            try:
+                selected_motor = int(input("Select motor ID: "))
+                if selected_motor not in motors:
+                    print(f"Invalid motor ID: {selected_motor}. Please select a valid ID.")
+                    selected_motor = None
+            except ValueError:
+                print("Invalid input. Please enter a valid motor ID.")
+                selected_motor = None
+
+        elif command == 't':
+            if selected_motor is None:
+                print("No motor selected.")
+                continue
+            new_id = int(input(f"Enter new ID for motor {selected_motor}: "))
+            tag_motor(packet_handler, selected_motor, new_id)
+        
+        elif command in ['\x1b[C', '\x1b[D']:  # Right and left arrow keys
+            if selected_motor is None:
+                print("No motor selected.")
+                continue
+            move_motor(packet_handler, selected_motor, STS_MIN_POS if command == '\x1b[D' else STS_MAX_POS)
+        
+        elif command == 'n':
+            min_position = packet_handler.ReadPosSpeed(selected_motor)[0]
+            print(f"Set min position to {min_position}")
+        
+        elif command == 'x':
+            max_position = packet_handler.ReadPosSpeed(selected_motor)[0]
+            print(f"Set max position to {max_position}")
+        
+        elif command == 's':
+            for motor_id in motors.keys():
+                position, speed, _, _ = packet_handler.ReadPosSpeed(motor_id)
+                print(f"ID: {motor_id}, Position: {position}, Speed: {speed}")
+        
+        elif command == 'c':
+            center_motor(packet_handler, selected_motor)
+        
+        elif command == 'q':
+            print("Exiting...")
+            break
+
+if __name__ == "__main__":
+    main()
+

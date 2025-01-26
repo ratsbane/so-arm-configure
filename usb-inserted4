@@ -1,0 +1,87 @@
+#!/usr/bin/python3
+import pyudev
+import os
+import time
+import re
+
+def list_current_serial_devices():
+    """
+    Lists all currently-attached serial bus controllers in /dev/serial/by-id.
+    Filters devices whose names contain 'USB_Single_Serial' (case-insensitive).
+    """
+    serial_dir = "/dev/serial/by-id"
+    if os.path.exists(serial_dir):
+        print("\nCurrently Attached Serial Devices:")
+        for entry in os.listdir(serial_dir):
+            if re.search(r"USB_Single_Serial", entry, re.IGNORECASE):
+                link_path = os.path.join(serial_dir, entry)
+                target = os.readlink(link_path)
+                print(f"  {link_path} -> {target}")
+    else:
+        print("\nSerial Directory not found: No devices currently attached.")
+    print("-" * 40)
+
+def print_device_summary(device):
+    """
+    Display a summary of key information about the USB device,
+    including the /dev/ttyACM* device and symbolic links in /dev/serial.
+    """
+    print("\nUSB Device Event:")
+    print(f"  Action: {device.action}")
+    
+    # Highlight the device node
+    device_node = device.device_node or device.get('DEVNAME', 'N/A')
+    print(f"  Device Node: {device_node}")
+    
+    # Check for ttyACM devices
+    if device_node and "ttyACM" in device_node:
+        print(f"  Serial Device: {device_node}")
+
+    # Vendor and Model information
+    vendor = device.get('ID_VENDOR', 'Unknown Vendor')
+    model = device.get('ID_MODEL', 'Unknown Model')
+    serial = device.get('ID_SERIAL_SHORT', 'Unknown Serial')
+    print(f"  Vendor: {vendor}")
+    print(f"  Model: {model}")
+    print(f"  Serial: {serial}")
+    
+    # Driver info
+    driver = device.get('DRIVER', 'No driver assigned')
+    print(f"  Driver: {driver}")
+    
+    # Look for /dev/serial symbolic links
+    serial_dir = "/dev/serial/by-id"
+    if os.path.exists(serial_dir):
+        print("  Serial Directory Links:")
+        for entry in os.listdir(serial_dir):
+            link_path = os.path.join(serial_dir, entry)
+            target = os.readlink(link_path)
+            print(f"    {link_path} -> {target}")
+    else:
+        print("  Serial Directory: Not found")
+    
+    print("-" * 40)
+
+# Create a udev context
+context = pyudev.Context()
+
+# Monitor for USB device events
+monitor = pyudev.Monitor.from_netlink(context)
+monitor.filter_by('usb')  # Only listen to USB devices
+
+# Enable receiving events asynchronously
+observer = pyudev.MonitorObserver(monitor, callback=print_device_summary)
+observer.start()
+
+print("Listing currently-attached devices...")
+list_current_serial_devices()
+
+print("\nListening for USB device events... Press Ctrl+C to exit.")
+
+# Keep the program running
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\nExiting...")
+
