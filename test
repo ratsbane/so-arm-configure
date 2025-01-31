@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+
+import os
+import sys, time
+import pyudev
+import tty
+import termios
+from STservo_sdk import *  # Make sure this module is included in the same directory
+
+# Constants
+BAUDRATE = 1000000
+STS_MIN_POS = 0
+STS_MAX_POS = 4095
+DEFAULT_DEVICE = '/dev/ttyACM0'
+
+# Global Variables
+interfaces = []
+selected_interface = '/dev/ttyACM0'
+motors = {}
+selected_motor = None
+min_position = None
+max_position = None
+
+# Initialize STServo SDK
+def initialize_sdk(device):
+    port_handler = PortHandler(device)
+    packet_handler = sts(port_handler)
+    if not port_handler.openPort():
+        print(f"Failed to open port {device}")
+        return None, None
+    if not port_handler.setBaudRate(BAUDRATE):
+        print(f"Failed to set baudrate for {device}")
+        return None, None
+    print(f"Initialized device {device}")
+    return port_handler, packet_handler
+
+port_handler, packet_handler = initialize_sdk(selected_interface)
+
+motor_id = 6  # The new ID you set
+
+# Try this?
+BROADCAST_ID=254
+packet_handler.action(BROADCAST_ID)  # Broadcast an action trigger
+
+position, result, error = packet_handler.ReadPos(motor_id)
+
+if result == COMM_SUCCESS:
+    print(f"✅ Motor {motor_id} is responding. Current Position: {position}")
+else:
+    print(f"❌ Motor {motor_id} is not responding. Error: {error}")
+
+result, error = packet_handler.write1ByteTxRx(6, STS_TORQUE_ENABLE, 1)
+
+if result == COMM_SUCCESS and error == 0:
+    print("✅ Torque enabled.")
+else:
+    print(f"❌ Failed to enable torque. Error: {error}")
+
+
+target_position = 2048  # Mid-range for a 0-4095 system
+result, error = packet_handler.WritePosEx(motor_id, target_position, 2400, 50)
+time.sleep(10)
+
+target_position = 1048  # Mid-range for a 0-4095 system
+result, error = packet_handler.WritePosEx(motor_id, target_position, 2400, 50)
+time.sleep(10)
+
+target_position = 3048  # Mid-range for a 0-4095 system
+result, error = packet_handler.WritePosEx(motor_id, target_position, 2400, 50)
+time.sleep(10)
+
+if result == COMM_SUCCESS and error == 0:
+    print(f"✅ Motor {motor_id} moving to position {target_position}")
+else:
+    print(f"❌ Failed to move motor {motor_id}. Error: {error}")
+
+min_limit, result_min, _ = packet_handler.read2ByteTxRx(6, STS_MIN_ANGLE_LIMIT_L)
+max_limit, result_max, _ = packet_handler.read2ByteTxRx(6, STS_MAX_ANGLE_LIMIT_L)
+
+if result_min == COMM_SUCCESS and result_max == COMM_SUCCESS:
+    print(f"🔍 Min Limit: {min_limit}, Max Limit: {max_limit}")
+else:
+    print("❌ Failed to read position limits.")
+
+packet_handler.write2ByteTxRx(6, STS_MIN_ANGLE_LIMIT_L, 0)     # Set minimum to 0
+packet_handler.write2ByteTxRx(6, STS_MAX_ANGLE_LIMIT_L, 4095)  # Set maximum to full range
+
+
+
