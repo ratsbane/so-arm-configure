@@ -6,6 +6,7 @@ from .group_sync_read import *
 from .group_sync_write import *
 
 #波特率定义
+# Baud rate definitions
 STS_1M = 0
 STS_0_5M = 1
 STS_250K = 2
@@ -17,10 +18,13 @@ STS_38400 = 7
 
 #内存表定义
 #-------EPROM(只读)--------
+# Memory Table Definition
+# -------EPROM (Read-Only) --------
 STS_MODEL_L = 3
 STS_MODEL_H = 4
 
 #-------EPROM(读写)--------
+# -------EPROM (Read/Write) --------
 STS_ID = 5
 STS_BAUD_RATE = 6
 STS_MIN_ANGLE_LIMIT_L = 9
@@ -34,6 +38,7 @@ STS_OFS_H = 32
 STS_MODE = 33
 
 #-------SRAM(读写)--------
+# -------SRAM (Read/Write) --------
 STS_TORQUE_ENABLE = 40
 STS_ACC = 41
 STS_GOAL_POSITION_L = 42
@@ -45,6 +50,7 @@ STS_GOAL_SPEED_H = 47
 STS_LOCK = 55
 
 #-------SRAM(只读)--------
+# -------SRAM (Read-Only) --------
 STS_PRESENT_POSITION_L = 56
 STS_PRESENT_POSITION_H = 57
 STS_PRESENT_SPEED_L = 58
@@ -80,6 +86,33 @@ class sts(protocol_packet_handler):
         sts_present_speed = self.sts_hiword(sts_present_position_speed)
         return self.sts_tohost(sts_present_position, 15), self.sts_tohost(sts_present_speed, 15), sts_comm_result, sts_error
 
+    def ReadVoltage(self, sts_id):
+        voltage, sts_comm_result, sts_error = self.read1ByteTxRx(sts_id, STS_PRESENT_VOLTAGE)
+        return voltage, sts_comm_result, sts_error
+
+    def ReadTemperature(self, sts_id):
+        temperature, sts_comm_result, sts_error = self.read1ByteTxRx(sts_id, STS_PRESENT_TEMPERATURE)
+        return temperature, sts_comm_result, sts_error
+
+    def ReadCurrent(self, sts_id):
+        current_l, sts_comm_result_l, sts_error_l = self.read1ByteTxRx(sts_id, STS_PRESENT_CURRENT_L)
+        current_h, sts_comm_result_h, sts_error_h = self.read1ByteTxRx(sts_id, STS_PRESENT_CURRENT_H)
+        if sts_comm_result_l == COMM_SUCCESS and sts_comm_result_h == COMM_SUCCESS:
+            current = (current_h << 8) | current_l
+            return current, COMM_SUCCESS, 0
+        else:
+            return None, sts_comm_result_l, sts_error_l
+
+    def ReadLoad(self, sts_id):
+        load_l, sts_comm_result_l, sts_error_l = self.read1ByteTxRx(sts_id, STS_PRESENT_LOAD_L)
+        load_h, sts_comm_result_h, sts_error_h = self.read1ByteTxRx(sts_id, STS_PRESENT_LOAD_H)
+        if sts_comm_result_l == COMM_SUCCESS and sts_comm_result_h == COMM_SUCCESS:
+            load = (load_h << 8) | load_l
+            return load, COMM_SUCCESS, 0
+        else:
+            return None, sts_comm_result_l, sts_error_l
+
+
     def ReadMoving(self, sts_id):
         moving, sts_comm_result, sts_error = self.read1ByteTxRx(sts_id, STS_MOVING)
         return moving, sts_comm_result, sts_error
@@ -94,6 +127,11 @@ class sts(protocol_packet_handler):
 
     def RegAction(self):
         return self.action(BROADCAST_ID)
+
+    def WriteID(self, current_id, new_id):
+        """ Changes the servo's ID. Must be done while the servo is the only one connected. """
+        return self.write1ByteTxRx(current_id, STS_ID, new_id)
+
 
     def WheelMode(self, sts_id):
         return self.write1ByteTxRx(sts_id, STS_MODE, 1)
