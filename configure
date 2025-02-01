@@ -83,6 +83,10 @@ def scan_existing_interfaces():
             if device_node not in interfaces:
                 interfaces.append(device_node)
 
+            if len(interfaces) == 1:
+                selected_interface = interfaces[0]
+                print(f"Automatically selected interface: {selected_interface}")
+
 # Initialize STServo SDK
 def initialize_sdk(device):
     port_handler = PortHandler(device)
@@ -96,6 +100,31 @@ def initialize_sdk(device):
     print(f"Initialized device {device}")
     return port_handler, packet_handler
 
+def report_motor_status(packet_handler, motor_id):
+    try:
+        position, speed, result, _ = packet_handler.ReadPosSpeed(motor_id)
+
+        if result == COMM_SUCCESS:
+            voltage, result_voltage, _ = packet_handler.ReadVoltage(motor_id)
+            temperature, result_temp, _ = packet_handler.ReadTemperature(motor_id)
+            current, result_curr, _ = packet_handler.ReadCurrent(motor_id)
+            load, result_load, _ = packet_handler.ReadLoad(motor_id)
+            moving_status, result_move, _ = packet_handler.ReadMoving(motor_id)
+
+            motors[motor_id] = {
+                "position": position,
+                "speed": speed,
+                "voltage": (voltage/10) if result_voltage == COMM_SUCCESS else None,
+                "temperature": temperature if result_temp == COMM_SUCCESS else None,
+                "current": current if result_curr == COMM_SUCCESS else None,
+                "load": load if result_load == COMM_SUCCESS else None,
+                "moving": moving_status if result_move == COMM_SUCCESS else None
+            }
+
+            print(f"{motor_id}: Position: {position}, Speed: {speed} Voltage: {voltage}V, Temperature: {temperature}°C, Current: {current}mA, Load: {load}, Moving: {'Yes' if moving_status else 'No'}")
+        
+    except Exception as e:
+        print(f"Error scanning motor ID {motor_id}: {e}")
 
 
 def discover_motors(packet_handler):
@@ -107,46 +136,11 @@ def discover_motors(packet_handler):
     motors.clear()
     print("Scanning for motors...")
 
-    for motor_id in range(1, 253):
-        try:
-            # Read Position and Speed
-            position, speed, result, _ = packet_handler.ReadPosSpeed(motor_id)
-
-            if result == COMM_SUCCESS:
-                # Read Voltage
-                voltage, result_voltage, _ = packet_handler.ReadVoltage(motor_id)
-
-                # Read Temperature
-                temperature, result_temp, _ = packet_handler.ReadTemperature(motor_id)
-
-                # Read Current (2 bytes: L + H)
-                current, result_curr, _ = packet_handler.ReadCurrent(motor_id)
-
-                # Read Load (2 bytes: L + H)
-                load, result_load, _ = packet_handler.ReadLoad(motor_id)
-
-                # Read Moving Status
-                moving_status, result_move, _ = packet_handler.ReadMoving(motor_id)
-
-                # Store motor data
-                motors[motor_id] = {
-                    "position": position,
-                    "speed": speed,
-                    "voltage": voltage if result_voltage == COMM_SUCCESS else None,
-                    "temperature": temperature if result_temp == COMM_SUCCESS else None,
-                    "current": current if result_curr == COMM_SUCCESS else None,
-                    "load": load if result_load == COMM_SUCCESS else None,
-                    "moving": moving_status if result_move == COMM_SUCCESS else None
-                }
-
-                print(f"Discovered motor ID {motor_id}:")
-                print(f"  Position: {position}, Speed: {speed}")
-                print(f"  Voltage: {voltage}V, Temperature: {temperature}°C")
-                print(f"  Current: {current}mA, Load: {load}")
-                print(f"  Moving: {'Yes' if moving_status else 'No'}")
-
-        except Exception as e:
-            print(f"Error scanning motor ID {motor_id}: {e}")
+    for motor_id in range(1, 12): # max motor_id=253.  Reduced during testing for brevity
+        position, speed, result, _ = packet_handler.ReadPosSpeed(motor_id)
+        if result == COMM_SUCCESS:
+            print(f"Found motor ID {motor_id}:")
+            report_motor_status(packet_handler, motor_id)
 
     if not motors:
         print("No motors found.")
@@ -190,6 +184,8 @@ def move_motor(packet_handler, motor_id, position):
     result, error = packet_handler.WritePosEx(motor_id, position, 2400, 50)
     if result != COMM_SUCCESS or error != 0:
         print(f"Failed to move motor ID {motor_id} to position {position}")
+
+
 
 # Center motor
 def center_motor(packet_handler, motor_id):
@@ -267,11 +263,49 @@ def main():
         #elif command in ['\x1b[C', '\x1b[D']:  # Right and left arrow keys
         elif command in ['\x1b[C', '\x1b[D', '\033[C', '\033[D']:  
             print("Moving motor")
+    
             if selected_motor is None:
-                print("No motor selected.")
+                print("❌ No motor selected. Cannot move.")
                 continue
-            move_motor(packet_handler, selected_motor, STS_MIN_POS if command == '\x1b[D' else STS_MAX_POS)
-        
+
+            # Read the current position
+            position, speed, result, _ = packet_handler.ReadPosSpeed(selected_motor)
+
+            if result != COMM_SUCCESS:
+                print(f"❌ Failed to read position of motor {selected_motor}.")
+                continue
+
+            move_increment = 50
+
+            # Default to center if min/max are not set
+            if min_position is None or max_position is None:
+                min_position, max_position = 0, 4095  # Absolute limits
+                center_position = 2047
+                print(f"⚠️ Min/max not set. Defaulting to center position: {center_position}")
+                new_position = center_position
+            else:
+                # Determine new position within limits
+                if command == "\x1b[C":  # Right Arrow (→)
+                    new_position = min(position + move_increment, max_position)
+                else:  # Left Arrow (←)
+                    new_position = max(position - move_increment, min_position)
+
+            # Move to new position
+            move_motor(packet_handler, selected_motor, new_position)
+
+            # Wait for the motor to stop moving
+            while True:
+                position, speed, result, _ = packet_handler.ReadPosSpeed(selected_motor)
+                if result != COMM_SUCCESS:
+                    print(f"❌ Failed to read motor position while waiting for stop.")
+                    break
+                if speed == 0:
+                    break
+            time.sleep(0.1)  # Short delay to prevent excessive polling
+
+            report_motor_status(packet_handler, selected_motor)
+
+
         elif command == 'n':
             min_position = packet_handler.ReadPosSpeed(selected_motor)[0]
             print(f"Set min position to {min_position}")
