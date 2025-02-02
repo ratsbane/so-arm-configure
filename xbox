@@ -1,0 +1,61 @@
+#!/usr/bin/python3
+import evdev
+from evdev import InputDevice, categorize, ecodes
+import time
+
+
+
+def find_xbox_controller():
+    """Scan for Xbox controller among connected input devices."""
+    devices = [InputDevice(path) for path in evdev.list_devices()]
+    for device in devices:
+        if 'Xbox' in device.name:
+            return device
+    return None
+
+def main():
+    print("Waiting for Xbox controller to be connected...")
+    controller = None
+
+    while not controller:
+        controller = find_xbox_controller()
+        if controller:
+            print(f"Xbox controller connected: {controller.name} at {controller.path}")
+            break
+        time.sleep(1)  # Wait before scanning again
+
+    print("Monitoring controller inputs. Press Ctrl+C to exit.")
+
+    THRESHOLD = 10  # Minimum change to report
+    prev_values = {}
+
+    try:
+        for event in controller.read_loop():
+            if event.type == ecodes.EV_KEY:
+                key_event = categorize(event)
+                if key_event.keystate == key_event.key_down:
+                    print(f"Button {key_event.keycode} pressed")
+                elif key_event.keystate == key_event.key_up:
+                    print(f"Button {key_event.keycode} released")
+            elif event.type == ecodes.EV_ABS:
+                absevent = categorize(event)
+                code = absevent.event.code
+                value = absevent.event.value
+                if code in prev_values:
+                    if abs(value - prev_values[code]) >= THRESHOLD:
+                        print(f"Analog {ecodes.ABS[code]} value: {value}")
+                        prev_values[code] = value
+                else:
+                    prev_values[code] = value
+            elif event.type == ecodes.EV_REL:
+                print(f"Relative {ecodes.REL[event.code]} value: {event.value}")
+            elif event.type == ecodes.EV_MSC:
+                print(f"Misc event: {event}")
+            else:
+                print(f"Other event: {event}")
+    except KeyboardInterrupt:
+        print("\nExiting...")
+
+if __name__ == "__main__":
+    main()
+

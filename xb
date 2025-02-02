@@ -1,0 +1,116 @@
+#!/usr/bin/python3
+
+
+import os, sys, time
+import evdev, pyudev
+from evdev import InputDevice, list_devices, categorize, ecodes
+from STservo_sdk import *  # Ensure this is the correct import based on your SDK's structure
+
+
+def scan_interfaces_for_arm():
+    """
+    Scan for existing USB interfaces that match the criteria and add them
+    to the `interfaces` list at startup.
+    """
+    interfaces = []
+    context = pyudev.Context()
+    for device in context.list_devices(subsystem='tty'):
+        device_node = device.device_node
+        if device_node and "ttyACM" in device_node:
+            print(f"Found existing interface: {device_node}")
+            if device_node not in interfaces:
+                interfaces.append(device_node)
+
+    if len(interfaces) == 0:
+        print("No SO-ARM100 controllers found")
+    elif (len(interfaces)) == 1:
+        print(f"Automatically selected SO-ARM100 at {interfaces[0]}")
+        return interfaces[0]
+    else:
+        print("Multiple SO-ARM100 controllers found.  Unable to comprehend... bailing out")
+
+
+# identify the path to the USB port with the XBox controller
+def scan_for_xbox_controller():
+    devices = [InputDevice(path) for path in evdev.list_devices()]
+    for device in devices:
+        if 'Xbox' in device.name:
+            print(f"Found Xbox controller: {device.name} at {device.path}")
+            return device.path
+    print("No Xbox controller found.   SOooorrryyyy.")
+    sys.exit()
+
+
+
+def map_value(value, in_min, in_max, out_min, out_max):
+    value = max(min(value, in_max), in_min)
+    return int((value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
+
+
+# The deadzone is the area around center for each of the joysticks, where slight fluctuations can happen
+def apply_deadzone(value, deadzone):
+    if abs(value) < deadzone:
+        return 0
+    return value
+
+
+# Move motor to specific position
+def move_motor(packet_handler, motor_id, position):
+    print(f"moving motor {motor_id} to position {position}")
+    result, error = packet_handler.WritePosEx(motor_id, position, 2400, 50)
+    if result != COMM_SUCCESS or error != 0:
+        print(f"Failed to move motor ID {motor_id} to position {position}")
+
+
+
+def main():
+    # Identify which USB port the SO-ARM100 is connected to
+    device = scan_interfaces_for_arm()
+    if not device:
+        sys.exit("Exiting due to no SO-ARM100 controller found.")
+
+    # Identify the path to the xbox controller
+    controller_path = scan_for_xbox_controller()
+    print(f"controller path is {controller_path}")
+    controller = InputDevice(controller_path)
+
+    # Initialize the connection to the arm
+    port_handler = PortHandler(device)
+    packet_handler = sts(port_handler)
+    if not port_handler.openPort():
+        print(f"Failed to open port {device}")
+        sys.exit()
+    if not port_handler.setBaudRate(1000000):  # default baud rate
+        print(f"Failed to set baudrate for {device}")
+        sys.exit()
+    print(f"Initialized connection to SO-ARM100 at {device}")
+    time.sleep(10)
+
+    joystick_to_motor_map = {
+        ecodes.ABS_X: [1, -32768, 32767, 0, 4095, 8000],  # Left Joystick Left/Right -> Motor 1 (Base rotation)
+        ecodes.ABS_Y: [2, -32768, 32767, 0, 4095, 8000],  # Left Joystick Up/Down -> Motor 2 (Shoulder extension)
+        ecodes.ABS_RY: [3, -32768, 32767, 0, 4095, 8000], # Right Joystick Up/Down -> Motor 3 (Elbow movement)
+        ecodes.ABS_RX: [4, -32768, 32767, 0, 4095, 8000], # Right Joystick Left/Right -> Motor 4 (Wrist up/down)
+        ecodes.ABS_Z: [5, 0, 255, 0, 4095, 30],           # Left Trigger -> Motor 5 (Hand rotation)
+        ecodes.ABS_RZ: [6, 0, 255, 0, 4095, 30]           # Right Trigger -> Motor 6 (Thumb movement)
+    }
+
+    try:
+        for event in controller.read_loop():
+            if event.type == ecodes.EV_SYN:
+                continue
+            print(f"Event type {event.type} and event code {event.code}")
+            if event.type == ecodes.EV_ABS and event.code in joystick_to_motor_map:
+                motor_id, min_js, max_js, min_m, max_m, deadzone = joystick_to_motor_map[event.code]
+                joystick_value = apply_deadzone(event.value, deadzone)
+                if joystick_value != 0:
+                    servo_position = map_value(joystick_value, min_js, max_js, min_m, max_m)
+                    move_motor(packet_handler, motor_id, servo_position)
+    finally:
+        port_handler.closePort()
+
+
+if __name__ == "__main__":
+    main()
+    print("Thank you for playing!")
+
