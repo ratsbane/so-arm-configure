@@ -1,61 +1,256 @@
 #!/usr/bin/python3
-import evdev
-from evdev import InputDevice, categorize, ecodes
-import time
+
+import os, sys, time
+import pygame
+import pyudev
+from STservo_sdk import *  # Ensure this is the correct import based on your SDK's structure
+
+
+def scan_interfaces_for_arm():
+    """Scan for SO-ARM100 robot arm connected via USB."""
+    interfaces = []
+    context = pyudev.Context()
+    for device in context.list_devices(subsystem='tty'):
+        device_node = device.device_node
+        if device_node and "ttyACM" in device_node:
+            print(f"Found SO-ARM100 interface: {device_node}")
+            interfaces.append(device_node)
+
+    if not interfaces:
+        print("No SO-ARM100 controllers found")
+        return None
+    elif len(interfaces) == 1:
+        print(f"Using SO-ARM100 at {interfaces[0]}")
+        return interfaces[0]
+    else:
+        print("Multiple SO-ARM100 controllers found. Exiting.")
+        sys.exit()
+
+
+def initialize_pygame_controller():
+    """Initialize pygame and detect the first available joystick."""
+    pygame.init()
+    pygame.joystick.init()
+
+    if pygame.joystick.get_count() == 0:
+        print("No joystick detected! Exiting.")
+        sys.exit()
+
+    joystick = pygame.joystick.Joystick(0)
+    joystick.init()
+    print(f"Connected to joystick: {joystick.get_name()}")
+    return joystick
+
+
+def map_speed(value, min_speed=200, max_speed=1200):
+    """Maps joystick input (-1.0 to 1.0) to motor speed (200-1200)."""
+    return int(abs(value) * (max_speed - min_speed) + min_speed)
+
+
+class MotorController:
+    """Class to manage motor movements and calibration."""
+    def __init__(self, packet_handler):
+        self.packet_handler = packet_handler
+        self.last_positions = {}
+        self.wrist_direction = 1  # 1 for one direction, -1 for the opposite
+        self.thumb_direction = 1  # Same toggle mechanism
+        self.motor_limits = {}  # Store calibrated min/max positions
+
+    def calibrate_motor(self, motor_id, motor_name, initial_min, initial_max):
+        """Calibrate a single motor to find its true min/max positions."""
+        print(f"Calibrating {motor_name} (Motor {motor_id})...")
+        speed = 300  # Calibration speed
+
+        # Move to initial minimum position, in case it is already beyond.
+        self.packet_handler.WritePosEx(motor_id, initial_min, speed, 50)
+        time.sleep(2) #Give it time to get there
+
+        # Move towards minimum, checking for stall
+        self.packet_handler.WriteVel(motor_id, -speed)
+        time.sleep(0.5)
+        min_pos = self.find_limit(motor_id, -1)
+        self.packet_handler.WriteVel(motor_id, 0) #Stop
+        time.sleep(0.1)
+        min_pos += 50  # Back off slightly from the absolute limit
+        print(f"  Calibrated minimum for {motor_name}: {min_pos}")
+
+
+        # Move to initial maximum position.
+        self.packet_handler.WritePosEx(motor_id, initial_max, speed, 50)
+        time.sleep(2)
+
+        # Move towards maximum, checking for stall
+        self.packet_handler.WriteVel(motor_id, speed)
+        time.sleep(0.5)
+        max_pos = self.find_limit(motor_id, 1)
+        self.packet_handler.WriteVel(motor_id, 0)
+        time.sleep(0.1)
+        max_pos -= 50  # Back off slightly from the absolute limit
+        print(f"  Calibrated maximum for {motor_name}: {max_pos}")
+
+
+        self.motor_limits[motor_id] = {"min": min_pos, "max": max_pos}
+        return min_pos, max_pos
+
+    def find_limit(self, motor_id, direction):
+        """Move motor until it stalls, then return the position."""
+        last_pos = self.packet_handler.ReadPos(motor_id)
+        time.sleep(0.1)
+        current_pos = self.packet_handler.ReadPos(motor_id)
+
+        while abs(current_pos - last_pos) > 2:  # Check for movement
+            last_pos = current_pos
+            time.sleep(0.1)
+            current_pos = self.packet_handler.ReadPos(motor_id)
+            # print(f"Motor {motor_id} moving, current position: {current_pos}, last_position: {last_pos}")   #For Debug
+
+        return current_pos
 
 
 
-def find_xbox_controller():
-    """Scan for Xbox controller among connected input devices."""
-    devices = [InputDevice(path) for path in evdev.list_devices()]
-    for device in devices:
-        if 'Xbox' in device.name:
-            return device
-    return None
+    def move_motor(self, motor_id, motor_name, speed, direction):
+        """Move motor in a continuous manner based on speed and direction."""
+
+        if motor_id not in self.motor_limits:
+            print(f"Motor {motor_id} ({motor_name}) not calibrated!  Skipping move.")
+            return
+
+        min_pos = self.motor_limits[motor_id]["min"]
+        max_pos = self.motor_limits[motor_id]["max"]
+
+        current_pos = self.packet_handler.ReadPos(motor_id)
+
+        if direction > 0:  # Moving towards max
+            if current_pos >= max_pos:
+                print(f"{motor_name} at maximum limit, stopping.")
+                self.packet_handler.WriteVel(motor_id, 0) # Stop if we hit the limit.
+                return
+        elif direction < 0: # Moving towards min
+            if current_pos <= min_pos:
+                print(f"{motor_name} at minimum limit, stopping.")
+                self.packet_handler.WriteVel(motor_id, 0)
+                return
+
+
+        # print(f"Moving {motor_name} (Motor {motor_id}) at speed {speed} in direction {direction}")  #Removed for less console output
+
+        result, error = self.packet_handler.WriteVel(motor_id, int(speed * direction))
+
+        if result != COMM_SUCCESS or error != 0:
+            print(f"Failed to move {motor_name} (Motor {motor_id})")
+
+
+    def toggle_wrist_direction(self):
+        """Toggle the direction of wrist rotation."""
+        self.wrist_direction *= -1
+
+    def toggle_thumb_direction(self):
+        """Toggle the direction of thumb grip movement."""
+        self.thumb_direction *= -1
+
 
 def main():
-    print("Waiting for Xbox controller to be connected...")
-    controller = None
+    """Main function to control the SO-ARM100 using an Xbox controller via pygame."""
 
-    while not controller:
-        controller = find_xbox_controller()
-        if controller:
-            print(f"Xbox controller connected: {controller.name} at {controller.path}")
-            break
-        time.sleep(1)  # Wait before scanning again
+    # Identify USB ports
+    device = scan_interfaces_for_arm()
+    if not device:
+        sys.exit("No SO-ARM100 controller found.")
 
-    print("Monitoring controller inputs. Press Ctrl+C to exit.")
+    # Initialize joystick
+    joystick = initialize_pygame_controller()
 
-    THRESHOLD = 10  # Minimum change to report
-    prev_values = {}
+    # Initialize robot arm communication
+    port_handler = PortHandler(device)
+    packet_handler = sts(port_handler)
 
-    try:
-        for event in controller.read_loop():
-            if event.type == ecodes.EV_KEY:
-                key_event = categorize(event)
-                if key_event.keystate == key_event.key_down:
-                    print(f"Button {key_event.keycode} pressed")
-                elif key_event.keystate == key_event.key_up:
-                    print(f"Button {key_event.keycode} released")
-            elif event.type == ecodes.EV_ABS:
-                absevent = categorize(event)
-                code = absevent.event.code
-                value = absevent.event.value
-                if code in prev_values:
-                    if abs(value - prev_values[code]) >= THRESHOLD:
-                        print(f"Analog {ecodes.ABS[code]} value: {value}")
-                        prev_values[code] = value
+
+    if not port_handler.openPort():
+        sys.exit(f"Failed to open port {device}")
+    if not port_handler.setBaudRate(1000000):  # Set default baud rate
+        sys.exit(f"Failed to set baud rate for {device}")
+
+    print(f"Connected to SO-ARM100 at {device}")
+
+    #Initialize motor controller *before* calibration
+    motor_controller = MotorController(packet_handler)
+
+    # Define joystick axis-to-motor mapping with initial min/max motor positions
+    # These initial values are used *before* calibration.  Good defaults.
+    joystick_to_motor = {
+        0:  {"id": 1, "name": "base", "min_pos": 1024, "max_pos": 3072},  # Left Joystick Left/Right
+        1:  {"id": 2, "name": "shoulder", "min_pos": 1024, "max_pos": 3072}, # Left Joystick Up/Down
+        4:  {"id": 3, "name": "elbow", "min_pos": 1024, "max_pos": 3072},  # Right Joystick Up/Down
+        3:  {"id": 4, "name": "wrist", "min_pos": 1024, "max_pos": 3072},  # Right Joystick Left/Right
+        2:  {"id": 5, "name": "hand", "min_pos": 0, "max_pos": 4095},  # Left Trigger (Full rotation)
+        5:  {"id": 6, "name": "thumb", "min_pos": 2048, "max_pos": 2500}   # Right Trigger (Limited range)
+    }
+
+    # Calibrate motors and store the actual limits
+    for axis, motor_data in joystick_to_motor.items():
+       #Only calibrate motors 1-4 and 6. Motor 5 has no limits.
+        if motor_data["id"] in [1, 2, 3, 4, 6]:
+            min_pos, max_pos = motor_controller.calibrate_motor(
+                motor_data["id"], motor_data["name"], motor_data["min_pos"], motor_data["max_pos"]
+            )
+            joystick_to_motor[axis]["min_pos"] = min_pos
+            joystick_to_motor[axis]["max_pos"] = max_pos
+
+    print("Calibration complete.")
+    #Initial positions after calibration.  Move all to their midpoints.
+    for axis, motor_data in joystick_to_motor.items():
+        if motor_data["id"] != 5: #Skip wrist rotate
+            midpoint = (motor_data["min_pos"] + motor_data["max_pos"]) // 2
+            packet_handler.WritePosEx(motor_data["id"], midpoint, 300, 50)
+    time.sleep(3) #Wait for them to get there
+
+    running = True
+    trigger_states = {2: False, 5: False}  # Track trigger states for toggling
+
+    while running:
+        pygame.event.pump()  # Update pygame event queue
+
+        for axis, motor in joystick_to_motor.items():
+            joystick_value = joystick.get_axis(axis)
+
+            if axis in [2, 5]:  # Trigger-based toggle for wrist/thumb
+                if joystick_value > 0.2:  # Trigger pressed
+                    if not trigger_states[axis]:  # Only toggle if it was previously released
+                        trigger_states[axis] = True
+                        if axis == 2:  # Left trigger controls wrist
+                            motor_controller.toggle_wrist_direction()
+                            speed = map_speed(joystick_value)
+                            motor_controller.move_motor(motor["id"], motor["name"], speed, motor_controller.wrist_direction)
+                        elif axis == 5:  # Right trigger controls thumb
+                            motor_controller.toggle_thumb_direction()
+                            speed = map_speed(joystick_value)
+                            motor_controller.move_motor( motor["id"], motor["name"], speed, motor_controller.thumb_direction)
                 else:
-                    prev_values[code] = value
-            elif event.type == ecodes.EV_REL:
-                print(f"Relative {ecodes.REL[event.code]} value: {event.value}")
-            elif event.type == ecodes.EV_MSC:
-                print(f"Misc event: {event}")
-            else:
-                print(f"Other event: {event}")
-    except KeyboardInterrupt:
-        print("\nExiting...")
+                    #When the trigger is released, stop motion, and reset the trigger state
+                    trigger_states[axis] = False
+                    motor_controller.move_motor(motor["id"], motor["name"], 0, 0) #Stop Movement
+
+
+            else:  # Joystick axes control speed-based movement
+                if abs(joystick_value) > 0.1:  # Apply built-in deadzone
+                    speed = map_speed(joystick_value)
+                    direction = 1 if joystick_value > 0 else -1
+                    motor_controller.move_motor(motor["id"], motor["name"], speed, direction)
+                else:
+                    #Stop motion when joystick is in deadzone
+                    motor_controller.move_motor(motor["id"], motor["name"], 0, 0)
+
+        # Exit condition (press Xbox controller's "Back" button)
+        if joystick.get_button(6):  # Xbox "Back" button (ID 6)
+            running = False
+
+        time.sleep(0.05)  # Small delay to prevent high CPU usage
+
+    port_handler.closePort()
+    print("Disconnected from SO-ARM100.")
+    pygame.quit()
+
 
 if __name__ == "__main__":
     main()
-
+    print("Thank you for playing!")

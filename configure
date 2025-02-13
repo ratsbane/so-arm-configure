@@ -315,13 +315,30 @@ def main():
             print(f"Set max position to {max_position}")
         
         elif command == 's':
-            for motor_id in motors.keys():
-                position, speed, _, _ = packet_handler.ReadPosSpeed(motor_id)
-                print(f"ID: {motor_id}, Position: {position}, Speed: {speed}")
+            if motors:
+                for motor_id in motors.keys():
+                    report_motor_status( packet_handler, motor_id)
+                    #position, speed, _, _ = packet_handler.ReadPosSpeed(motor_id)
+                    #print(f"ID: {motor_id}, Position: {position}, Speed: {speed}")
         
-        elif command == 'c':
+        elif command == 'c':  # center selected motor
             center_motor(packet_handler, selected_motor)
-        
+
+        elif command == 'y':  # fold
+            folded = { 1: 2049, 2: 859, 3: 3134, 4: 2874, 5: 2291, 6: 980 } 
+            if motors:
+                for motor_id in motors.keys():
+                    if motor_id in folded:
+                        move_motor(packet_handler, motor_id, folded[motor_id])
+
+        elif command == 'u':  # unfold
+            unfolded = {  2: 1789, 3: 1159, 4: 2116, 5: 2146 } 
+            if motors:
+                for motor_id in motors.keys():
+                    if motor_id in unfolded:
+                        move_motor(packet_handler, motor_id, unfolded[motor_id])
+
+
         elif command == 'q':
             print("Exiting...")
             break
